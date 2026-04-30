@@ -5,7 +5,7 @@ Jin Wu, Chaoqun Wang, Jieqi Shi, Yulong Huang*, Jiwen Lu, Wei He
 
 University of Science and Technology Beijing, China
 
-E-mail: wujin@ustc.edu.cn (Wu, Jin); heuedu@163.com (Huang, Yulong)
+E-mail: wujin@ustc.edu.cn (Wu, Jin); heuedu@163.com (Huang, Yulong; Corresponding Author)
 
 ## Introduction
 This repository is a CMake/C++ package for hand-eye / robot-world calibration of the form
