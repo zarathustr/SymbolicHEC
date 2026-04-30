@@ -265,6 +265,58 @@ The C++ implementation mirrors that idea in two ways:
 
 The benchmark executable exists precisely because solver efficiency in this project is often dominated by the structured linear solves inside template reduction, not by the surrounding command-line scaffolding.
 
+### Large Elimination Templates
+
+<p align="center">
+  <img src="figures/C_Full_gX1.jpg" width="48%" alt="Sparse elimination template for complete HERWC with action monomial gX1" />
+  <img src="figures/C_Full_gY1.jpg" width="48%" alt="Sparse elimination template for complete HERWC with action monomial gY1" />
+</p>
+
+For the complete HERWC solver, the elimination template can become genuinely large. The paper reports sparse template matrices `C` of size `6991 x 6991` for one action-monomial choice and `4343 x 4343` for another. These are not toy symbolic systems: they are the concrete linear algebra objects that the Gröbner pipeline must reduce in order to construct action matrices and recover candidate roots.
+
+<p align="center">
+  <img src="figures/A_Full_gX1.jpg" width="48%" alt="Normal matrix C transpose C for the large HERWC template with action monomial gX1" />
+  <img src="figures/A_Full_gY1.jpg" width="48%" alt="Normal matrix C transpose C for the large HERWC template with action monomial gY1" />
+</p>
+
+The normal-equation forms `CᵀC` remain large and sparse, with repeated support patterns rather than dense fill everywhere. This is one of the main reasons the repository exposes multiple backend choices instead of assuming a single dense direct solve is always appropriate. The matrix-geometry figures make the paper’s point visually: minimum-parameter reduction lowers the optimization dimension, but it still leaves a serious structured linear-system problem to solve efficiently.
+
+### Parallelized Linear-System Solving
+
+<p align="center">
+  <img src="figures/intersection_segmentation.png" width="48%" alt="Intersection geometry and elimination template segmentation" />
+  <img src="figures/inversion.png" width="48%" alt="Parallel matrix inversion mechanism for large-scale Gaussian elimination" />
+</p>
+
+The right panel of the first figure shows the departition strategy used for the elimination template: rows and columns are grouped into blocks associated with retained monomials, eliminated monomials, and action variables. The second figure illustrates the corresponding parallel matrix-inversion mechanism used for large-scale Gaussian elimination. Together they motivate the solver architecture used here:
+
+- solve structured systems of the form `C U = P` or the regularized normal equations derived from them;
+- exploit sparse or weakly coupled blocks rather than treating the template as one monolithic dense matrix;
+- parallelize independent block work and repeated right-hand-side solves with oneTBB.
+
+This is the algorithmic bridge between the symbolic reduction in the paper and the practical C++ backend layer in this repository.
+
+### Contour Geometry Of Reduced Problems
+
+<p align="center">
+  <img src="figures/contours.png" width="82%" alt="Contour geometry of reduced HERWC equations in gY coordinates" />
+</p>
+
+The reduced problems are still highly nonlinear even after translation elimination. In the contour slices above, the upper row visualizes the pure-translation HERWC equations in the `g_Y` coordinate space, the middle row shows slices of the complete reduced equations, and the lower row shows the squared-norm objective of the complete system. These figures are a geometric explanation of why a globally valid polynomial solver is useful: local linearization can miss the structure of the zero-level intersections.
+
+<p align="center">
+  <img src="figures/complete.png" width="40%" alt="Contour plot of one complete HERWC reduced sub-equation" />
+  <img src="figures/complete2.png" width="42%" alt="Zoomed contour plot of one complete HERWC reduced sub-equation" />
+</p>
+
+The zoomed complete-HERWC contours show separated low-value regions and sharp local variation around a root. This matches the paper’s observation that the reduced complete problem remains strongly non-convex even after symbolic elimination, and that coefficient scaling can be severe enough to require careful numerical handling.
+
+<p align="center">
+  <img src="figures/HERWTFC_contour.png" width="82%" alt="Contour plots for the reduced HERWTFC system after eliminating translation and redundant rotation" />
+</p>
+
+The same plotting logic extends to the more general `A X B = Y C Z` variant. After eliminating translations and algebraically removing the redundant `Z` rotation, the reduced HERWTFC system still shows anisotropic, root-preserving, and non-convex contour structure. Even though this repository is centered on the `AX=YB` solver path, this figure helps place the AXYB implementation inside the broader minimum-parameter symbolic reduction program described by the paper.
+
 
 ## Build: ARM64 macOS / Clang 16
 
