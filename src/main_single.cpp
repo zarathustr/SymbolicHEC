@@ -24,11 +24,14 @@ int main(int argc, char** argv) {
         auto p = axyb::make_random_problem(cli.len, cli.noise, rng);
         std::cout << "seed = " << seed << "\nbackend = " << cli.solver.backend_name;
         if (cli.retry_tol_set) std::cout << "\nretry_tol = " << cli.retry_tol;
+        if (cli.solver.prescale != 1.0) std::cout << "\nprescale = " << cli.solver.prescale;
+        if (cli.solver.asymmetric) std::cout << "\nasymmetric = true";
         std::cout << "\ng_GT = [";
         for (int i = 0; i < 6; ++i) std::cout << (i ? ", " : "") << p.g_ground_truth[i];
         std::cout << "]\ninitial objective = " << axyb::J_AXYB(p.As, p.Bs, p.X0, p.Y0) << "\n";
         auto r = axyb::AXYB_complete_grobner_with_retry(p.As, p.Bs, cli.mu, cli.solver, cli.retry_tol_set ? cli.retry_tol : -1.0);
         if (cli.retry_tol_set) std::cout << "backend used = " << r.backend_name << "\nbackend attempts = " << r.attempts << "\n";
+        axyb::print_dense_solve_diagnostics(r);
         axyb::print_matrix(r.X, "X1");
         axyb::print_matrix(p.X0, "X0");
         axyb::print_matrix(r.Y, "Y1");

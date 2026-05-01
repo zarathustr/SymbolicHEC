@@ -379,6 +379,9 @@ export AXYB_TEMPLATE_DIR=/path/to/data/templates
 --seed N             Reproducible RNG seed
 --pcg-tol X          PCG tolerance, default 1e-8
 --pcg-maxit N        PCG iteration limit, default 300
+--prescale X         Multiply assembled C0 and C1 template matrices, default 1
+--asymmetric         Solve C0 * x = C1t directly; defaults to lapack-gesv
+--verbose            Print dense solve determinant diagnostics
 --no-fallback        Disable dense direct fallback for iterative methods
 --no-template-parallel Disable oneTBB parallel execution across selected templates
 --no-backend-parallel Disable oneTBB parallel execution across retry backends
@@ -392,7 +395,7 @@ Without `--template` or `--templates`, the solver runs all six templates and kee
 
 For `test_AXYB_grobner_solver_loop`, `--output_meas PATH` writes every generated synthetic problem in loop order to one text file. `--input_meas PATH` replays every stored problem from one such file instead of generating new random data; in that mode `--iters`, `--len`, `--noise`, and `--seed` are ignored.
 
-If `--retry_tol X` is set and the chosen backend returns an objective larger than `X`, the solver reruns the full solve with additional backends. By default those retry backends are evaluated concurrently with oneTBB, but selection still follows this order: the first backend in the list whose objective is at most `X` is chosen; if none reach the tolerance, the best objective across all attempted backends is returned. Use `--no-backend-parallel` to force serial retry.
+If `--retry_tol X` is set and the chosen backend returns an objective larger than `X`, the solver reruns the full solve with additional backends. By default those retry backends are evaluated concurrently with oneTBB, but selection still follows this order: the first backend in the list whose objective is at most `X` is chosen; if none reach the tolerance, the best objective across all attempted backends is returned. Use `--no-backend-parallel` to force serial retry. The new SVD-style LAPACK backends are intentionally not part of this automatic retry list because they are substantially more expensive than the default retry set.
 
 ```text
 lapack-gesv, tbb-block-jacobi, eigen-llt, eigen-partial-piv-lu, eigen-ldlt, eigen-sparse-lu, tbb-pcg
@@ -409,7 +412,7 @@ Useful benchmark-specific options:
 --warmup N           Untimed passes per backend, default 1
 ```
 
-All common data-generation and template-selection options still apply, including `--data-dir`, `--template`, `--templates`, `--len`, `--noise`, `--mu`, `--seed`, `--threads`, `--pcg-tol`, `--pcg-maxit`, and `--no-fallback`. `--retry_tol`, `--no-template-parallel`, and `--no-backend-parallel` are solver-only and are not used by the linear benchmark.
+All common data-generation and template-selection options still apply, including `--data-dir`, `--template`, `--templates`, `--len`, `--noise`, `--mu`, `--seed`, `--threads`, `--pcg-tol`, `--pcg-maxit`, `--prescale`, `--asymmetric`, and `--no-fallback`. `--retry_tol`, `--no-template-parallel`, and `--no-backend-parallel` are solver-only and are not used by the linear benchmark.
 
 ## Real-world RWHE Processing
 
@@ -440,11 +443,16 @@ for each Gröbner template.  Available backend names are:
 | --- | --- |
 | `tbb-pcg`, `pcg`, `parallel-pcg` | oneTBB-parallel preconditioned conjugate gradients; block preconditioner uses LAPACK Cholesky/LU by template blocks |
 | `tbb-block-jacobi`, `block-backslash`, `backslash` | oneTBB-parallel block-Jacobi/backslash-style iteration with dense fallback |
-| `lapack-posv`, `dense-cholesky`, `matlab_backslash`, `direct`, `accelerate`, `blas-cholesky` | Dense normal matrix plus LAPACK/Accelerate Cholesky solve |
-| `lapack-gesv`, `dense-lu`, `blas-lu` | Dense normal matrix plus LAPACK/Accelerate LU solve |
+| `lapack-posv`, `dense-cholesky`, `matlab_backslash`, `direct`, `accelerate`, `blas-cholesky` | Dense normal matrix plus LAPACK/Accelerate `dposv` Cholesky driver |
+| `lapack-gesv`, `dense-lu`, `blas-lu` | Dense normal matrix plus LAPACK/Accelerate `dgesv` LU driver |
+| `lapack-llt`, `lapack-potrf`, `lapack-potrs` | Dense normal matrix plus explicit LAPACK `dpotrf`/`dpotrs` LLT factorization and solve |
+| `lapack-partial-piv-lu`, `lapack-getrf`, `lapack-getrs` | Dense system plus explicit LAPACK `dgetrf`/`dgetrs` partial-pivot LU |
+| `lapack-ldlt`, `lapack-sysv` | Dense normal matrix plus LAPACK `dsysv` symmetric-indefinite LDLT solve |
+| `lapack-pinv`, `lapack-pseudoinverse` | Dense system plus LAPACK `dgesvd` pseudoinverse solve |
+| `lapack-svd` | Dense system plus LAPACK `dgesvd` direct SVD solve |
 | `eigen-llt`, `eigen-ldlt`, `eigen-partial-piv-lu`, `eigen-sparse-lu` | Optional Eigen interfaces enabled when CMake finds Eigen3 |
 
-The default backend is `tbb-pcg`, which avoids explicitly factorizing the largest dense normal matrices.  The dense LAPACK/Accelerate modes are useful for validation and MATLAB-like behavior, but the largest template has 6991 unknowns, so direct dense solves can require substantial memory.
+The default backend is `tbb-pcg`, which avoids explicitly factorizing the largest dense normal matrices. The dense LAPACK/Accelerate modes are useful for validation and MATLAB-like behavior, but the largest template has 6991 unknowns, so direct dense solves can require substantial memory. `lapack-pinv` and `lapack-svd` are the heaviest options by a wide margin because they run full dense SVD on the template system.
 
 ## Parallel processing
 
@@ -456,6 +464,9 @@ The C++ implementation uses oneTBB in four places:
 4. automatic parallel execution across retry backends once `--retry_tol` triggers additional solves.
 
 Use `--threads N` to limit oneTBB worker count at runtime. Use `--no-template-parallel` or `--no-backend-parallel` if you need to force serial execution at either level.
+Use `--prescale X` to multiply the assembled `C0` and `C1` template matrices before `BB` construction and the downstream linear solve.
+Use `--asymmetric` to bypass the normal equations and solve `C0 * x = C1t` directly. If no backend is specified, this mode defaults to `lapack-gesv`.
+Use `--verbose` to enable the `dense solve determinants:` block; without it, those determinant diagnostics are neither computed nor printed.
 
 ## Regenerating the converted template files
 

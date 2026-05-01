@@ -80,15 +80,57 @@ Matrix cayleyR(const std::vector<double>& g) {
     return matmul(inverse(add(I, G, 1)), add(I, G, -1));
 }
 
-std::vector<std::array<std::complex<double>, 6>> solve_action(int action, const std::vector<double>& W, double mu,
-                                                              const SolverOptions& opts) {
-    auto tpl = load_template(opts.template_dir, action);
+constexpr double kActionScale = 5e-3;
+
+Matrix dense_from_sparse(const SparseMatrixCSC& sparse) {
+    Matrix dense(sparse.rows, sparse.cols);
+    for (int col = 0; col < sparse.cols; ++col)
+        for (int p = sparse.col_ptr[col]; p < sparse.col_ptr[col + 1]; ++p)
+            dense(sparse.row_idx[p], col) = sparse.values[p];
+    return dense;
+}
+
+void scale_sparse_inplace(SparseMatrixCSC& matrix, double alpha) {
+    if (alpha == 1.0) return;
+    for (double& value : matrix.values) value *= alpha;
+}
+
+struct PreparedActionSystem {
+    const TemplateData* tpl = nullptr;
+    SparseMatrixCSC c0;
+    Matrix rhs;
+};
+
+struct PreparedActionOutcome {
+    std::vector<std::array<std::complex<double>, 6>> roots;
+    DenseSolveDiagnostic dense_solve;
+};
+
+struct PreparedGrobnerProblem {
+    const std::vector<Matrix>* As = nullptr;
+    const std::vector<Matrix>* Bs = nullptr;
+    Matrix at;
+    Matrix bt;
+    std::vector<PreparedActionSystem> actions;
+};
+
+PreparedActionSystem prepare_action_system(int action, const std::vector<double>& W, const SolverOptions& opts) {
+    const auto& tpl = load_template_cached(opts.template_dir, action);
     auto coeff = map_coefficients(tpl, W);
-    auto C0 = build_sparse_from_template(tpl.n, tpl.n, tpl.c0_linear, tpl.c0_coeff, coeff);
-    auto C1t = build_sparse_from_template(tpl.n, tpl.m, tpl.c1_linear, tpl.c1_coeff, coeff);
-    double sc = 5e-3;
-    Matrix BB = compute_BB(C0, C1t, sc);
-    Matrix C1 = solve_template_system(C0, BB, mu, sc, tpl, opts);
+    auto c0 = build_c0_from_template(tpl, coeff);
+    auto c1t = build_c1_from_template(tpl, coeff);
+    scale_sparse_inplace(c0, opts.prescale);
+    scale_sparse_inplace(c1t, opts.prescale);
+    Matrix rhs = opts.asymmetric ? dense_from_sparse(c1t) : compute_BB(c0, c1t, kActionScale);
+    return {&tpl, std::move(c0), std::move(rhs)};
+}
+
+PreparedActionOutcome solve_prepared_action(const PreparedActionSystem& prepared, double mu, const SolverOptions& opts) {
+    const TemplateData& tpl = *prepared.tpl;
+    DenseSolveDiagnostic diag;
+    DenseSolveDiagnostic* diag_ptr = opts.verbose ? &diag : nullptr;
+    Matrix C1 = solve_template_system(prepared.c0, prepared.rhs, mu, kActionScale, tpl, opts, diag_ptr);
+    if (diag_ptr) diag.action = tpl.action;
     Matrix AM(tpl.m, tpl.m);
     for (int r = 0; r < tpl.m; ++r) {
         int src = static_cast<int>(tpl.am_ind[r]);
@@ -102,11 +144,13 @@ std::vector<std::array<std::complex<double>, 6>> solve_action(int action, const 
     }
     std::vector<std::complex<double>> evals;
     CMatrix V = eig_complex(AM, evals);
-    std::vector<std::array<std::complex<double>, 6>> roots(tpl.m);
+    PreparedActionOutcome outcome;
+    if (diag_ptr) outcome.dense_solve = diag;
+    outcome.roots.resize(tpl.m);
     for (int c = 0; c < tpl.m; ++c)
         for (int k = 0; k < 6; ++k)
-            roots[c][k] = tpl.sol_sources[k] < 0 ? evals[c] : V(tpl.sol_sources[k], c);
-    return roots;
+            outcome.roots[static_cast<size_t>(c)][k] = tpl.sol_sources[k] < 0 ? evals[c] : V(tpl.sol_sources[k], c);
+    return outcome;
 }
 
 bool retry_accept(const SolveResult& result, double retry_tol) {
@@ -117,6 +161,10 @@ bool better_objective(double candidate, double current_best) {
     if (!std::isfinite(candidate)) return false;
     if (!std::isfinite(current_best)) return true;
     return candidate < current_best;
+}
+
+bool backend_usable_for_options(LinearBackend backend, const SolverOptions& opts) {
+    return !opts.asymmetric || backend_supports_asymmetric(backend);
 }
 
 const std::vector<std::pair<LinearBackend, const char*>>& retry_backends() {
@@ -143,15 +191,109 @@ struct BackendAttemptOutcome {
     std::exception_ptr error;
 };
 
-BackendAttemptOutcome run_backend_attempt(const std::vector<Matrix>& As, const std::vector<Matrix>& Bs, double mu,
-                                          const SolverOptions& opts, const BackendAttemptSpec& spec) {
+PreparedGrobnerProblem prepare_grobner_problem(const std::vector<Matrix>& As, const std::vector<Matrix>& Bs,
+                                               const SolverOptions& opts) {
+    PreparedGrobnerProblem prepared;
+    prepared.As = &As;
+    prepared.Bs = &Bs;
+
+    double invlen = 1.0 / static_cast<double>(As.size());
+    std::vector<double> Aeq(36), Ares(54), bsum(6);
+    for (size_t i = 0; i < As.size(); ++i) {
+        auto RA = Rof(As[i]);
+        auto tA = tof(As[i]), tB = tof(Bs[i]);
+        addsc(Aeq, A_eq_tXtY_func(flatten_col_major(RA)), invlen);
+        addsc(Ares, A_res_eq_tXtY_RY_func(flatten_col_major(RA), tA, tB), invlen);
+        addsc(bsum, b_eq_tXtY_func(flatten_col_major(RA), tA), invlen);
+    }
+    Matrix AeqM = v2m(Aeq, 6, 6);
+    prepared.at = solve_dense(AeqM, v2m(Ares, 6, 9), false);
+    prepared.bt = solve_dense(AeqM, v2m(bsum, 6, 1), false);
+    for (auto& v : prepared.at.a) v = -v;
+
+    std::vector<double> Wt(60), Wr(240);
+    for (size_t i = 0; i < As.size(); ++i) {
+        auto RA = Rof(As[i]), RB = Rof(Bs[i]);
+        auto tA = tof(As[i]), tB = tof(Bs[i]);
+        addsc(Wt, W_J_trans_cayley_gY_func(flatten_col_major(RA), flatten_col_major(RB), tA, tB,
+                                           flatten_col_major(prepared.at), flatten_col_major(prepared.bt)),
+              invlen);
+        addsc(Wr, W_J_rot_gXgY_func(flatten_col_major(RA), flatten_col_major(RB)), invlen);
+    }
+    auto W = W_AXYB_gXgY_func(Wt, Wr);
+    std::vector<int> action_ids;
+    for (int action = opts.template_first; action <= opts.template_last; ++action) action_ids.push_back(action);
+    prepared.actions.resize(action_ids.size());
+    if (opts.parallel_templates && action_ids.size() > 1) {
+        tbb::parallel_for(0, static_cast<int>(action_ids.size()), [&](int i) {
+            prepared.actions[static_cast<size_t>(i)] = prepare_action_system(action_ids[static_cast<size_t>(i)], W, opts);
+        });
+    } else {
+        for (size_t i = 0; i < action_ids.size(); ++i) prepared.actions[i] = prepare_action_system(action_ids[i], W, opts);
+    }
+    return prepared;
+}
+
+SolveResult solve_prepared_grobner(const PreparedGrobnerProblem& prepared, double mu, const SolverOptions& opts) {
+    std::vector<PreparedActionOutcome> action_outcomes(prepared.actions.size());
+    if (opts.parallel_templates && prepared.actions.size() > 1) {
+        tbb::parallel_for(0, static_cast<int>(prepared.actions.size()), [&](int i) {
+            action_outcomes[static_cast<size_t>(i)] = solve_prepared_action(prepared.actions[static_cast<size_t>(i)], mu, opts);
+        });
+    } else {
+        for (size_t i = 0; i < prepared.actions.size(); ++i) action_outcomes[i] = solve_prepared_action(prepared.actions[i], mu, opts);
+    }
+
+    std::vector<std::array<std::complex<double>, 6>> roots;
+    std::vector<DenseSolveDiagnostic> dense_solve_diagnostics;
+    for (auto& outcome : action_outcomes) {
+        roots.insert(roots.end(), outcome.roots.begin(), outcome.roots.end());
+        if (outcome.dense_solve.used_dense_solve) dense_solve_diagnostics.push_back(outcome.dense_solve);
+    }
+
+    SolveResult best;
+    best.objective = std::numeric_limits<double>::infinity();
+    best.roots = roots;
+    best.backend_name = opts.backend_name;
+    best.attempts = 1;
+    best.dense_solve_diagnostics = std::move(dense_solve_diagnostics);
+    for (auto& root : roots) {
+        std::vector<double> gx(3), gy(3);
+        for (int i = 0; i < 3; ++i) {
+            gx[i] = root[i].real();
+            gy[i] = root[i + 3].real();
+        }
+        Matrix RX = cayleyL(gx), RY = cayleyR(gy);
+        auto ry = flatten_col_major(RY);
+        std::vector<double> tx(3), ty(3);
+        for (int r = 0; r < 3; ++r) {
+            for (int k = 0; k < 9; ++k) {
+                tx[r] += prepared.at(r, k) * ry[k];
+                ty[r] += prepared.at(r + 3, k) * ry[k];
+            }
+            tx[r] -= prepared.bt(r, 0);
+            ty[r] -= prepared.bt(r + 3, 0);
+        }
+        Matrix X = makeT(RX, tx), Y = makeT(RY, ty);
+        double f = J_AXYB(*prepared.As, *prepared.Bs, X, Y);
+        if (std::isfinite(f) && f < best.objective) {
+            best.objective = f;
+            best.X = std::move(X);
+            best.Y = std::move(Y);
+        }
+    }
+    return best;
+}
+
+BackendAttemptOutcome run_backend_attempt(const PreparedGrobnerProblem& prepared, double mu, const SolverOptions& opts,
+                                          const BackendAttemptSpec& spec) {
     SolverOptions current_opts = opts;
     current_opts.backend = spec.backend;
     current_opts.backend_name = spec.name;
     try {
         BackendAttemptOutcome outcome;
         outcome.ok = true;
-        outcome.result = AXYB_complete_grobner(As, Bs, mu, current_opts);
+        outcome.result = solve_prepared_grobner(prepared, mu, current_opts);
         outcome.result.backend_name = spec.name;
         return outcome;
     } catch (...) {
@@ -219,77 +361,14 @@ double pose_error(const Matrix& X, const Matrix& X0) { return frobenius_squared(
 
 SolveResult AXYB_complete_grobner(const std::vector<Matrix>& As, const std::vector<Matrix>& Bs, double mu,
                                   const SolverOptions& opts) {
-    double invlen = 1.0 / static_cast<double>(As.size());
-    std::vector<double> Aeq(36), Ares(54), bsum(6);
-    for (size_t i = 0; i < As.size(); ++i) {
-        auto RA = Rof(As[i]);
-        auto tA = tof(As[i]), tB = tof(Bs[i]);
-        addsc(Aeq, A_eq_tXtY_func(flatten_col_major(RA)), invlen);
-        addsc(Ares, A_res_eq_tXtY_RY_func(flatten_col_major(RA), tA, tB), invlen);
-        addsc(bsum, b_eq_tXtY_func(flatten_col_major(RA), tA), invlen);
-    }
-    Matrix AeqM = v2m(Aeq, 6, 6);
-    Matrix At = solve_dense(AeqM, v2m(Ares, 6, 9), false);
-    Matrix bt = solve_dense(AeqM, v2m(bsum, 6, 1), false);
-    for (auto& v : At.a) v = -v;
-    std::vector<double> Wt(60), Wr(240);
-    for (size_t i = 0; i < As.size(); ++i) {
-        auto RA = Rof(As[i]), RB = Rof(Bs[i]);
-        auto tA = tof(As[i]), tB = tof(Bs[i]);
-        addsc(Wt, W_J_trans_cayley_gY_func(flatten_col_major(RA), flatten_col_major(RB), tA, tB,
-                                           flatten_col_major(At), flatten_col_major(bt)),
-              invlen);
-        addsc(Wr, W_J_rot_gXgY_func(flatten_col_major(RA), flatten_col_major(RB)), invlen);
-    }
-    auto W = W_AXYB_gXgY_func(Wt, Wr);
-    std::vector<int> actions;
-    for (int action = opts.template_first; action <= opts.template_last; ++action) actions.push_back(action);
-    std::vector<std::vector<std::array<std::complex<double>, 6>>> ar(actions.size());
-    if (opts.parallel_templates && actions.size() > 1) {
-        tbb::parallel_for(0, static_cast<int>(actions.size()),
-                          [&](int i) { ar[static_cast<size_t>(i)] = solve_action(actions[static_cast<size_t>(i)], W, mu, opts); });
-    } else {
-        for (size_t i = 0; i < actions.size(); ++i) ar[i] = solve_action(actions[i], W, mu, opts);
-    }
-    std::vector<std::array<std::complex<double>, 6>> roots;
-    for (auto& r : ar) roots.insert(roots.end(), r.begin(), r.end());
-    SolveResult best;
-    best.objective = std::numeric_limits<double>::infinity();
-    best.roots = roots;
-    best.backend_name = opts.backend_name;
-    best.attempts = 1;
-    for (auto& root : roots) {
-        std::vector<double> gx(3), gy(3);
-        for (int i = 0; i < 3; ++i) {
-            gx[i] = root[i].real();
-            gy[i] = root[i + 3].real();
-        }
-        Matrix RX = cayleyL(gx), RY = cayleyR(gy);
-        auto ry = flatten_col_major(RY);
-        std::vector<double> tx(3), ty(3);
-        for (int r = 0; r < 3; ++r) {
-            for (int k = 0; k < 9; ++k) {
-                tx[r] += At(r, k) * ry[k];
-                ty[r] += At(r + 3, k) * ry[k];
-            }
-            tx[r] -= bt(r, 0);
-            ty[r] -= bt(r + 3, 0);
-        }
-        Matrix X = makeT(RX, tx), Y = makeT(RY, ty);
-        double f = J_AXYB(As, Bs, X, Y);
-        if (std::isfinite(f) && f < best.objective) {
-            best.objective = f;
-            best.X = std::move(X);
-            best.Y = std::move(Y);
-        }
-    }
-    return best;
+    return solve_prepared_grobner(prepare_grobner_problem(As, Bs, opts), mu, opts);
 }
 
 SolveResult AXYB_complete_grobner_with_retry(const std::vector<Matrix>& As, const std::vector<Matrix>& Bs, double mu,
                                              const SolverOptions& opts, double retry_tol) {
     if (retry_tol < 0.0) return solve_once(As, Bs, mu, opts);
 
+    PreparedGrobnerProblem prepared = prepare_grobner_problem(As, Bs, opts);
     SolveResult best;
     bool have_best = false;
     int attempts = 0;
@@ -303,7 +382,7 @@ SolveResult AXYB_complete_grobner_with_retry(const std::vector<Matrix>& As, cons
 
     BackendAttemptSpec requested{opts.backend, opts.backend_name};
     ++attempts;
-    BackendAttemptOutcome first = run_backend_attempt(As, Bs, mu, opts, requested);
+    BackendAttemptOutcome first = run_backend_attempt(prepared, mu, opts, requested);
     if (first.ok) {
         consider_success(first.result);
         if (retry_accept(first.result, retry_tol)) {
@@ -317,13 +396,13 @@ SolveResult AXYB_complete_grobner_with_retry(const std::vector<Matrix>& As, cons
 
     std::vector<BackendAttemptSpec> remaining;
     for (const auto& entry : retry_backends())
-        if (entry.first != opts.backend)
+        if (entry.first != opts.backend && backend_usable_for_options(entry.first, opts))
             remaining.push_back({entry.first, entry.second});
 
     if (!opts.parallel_backend_retries || remaining.size() <= 1) {
         for (const auto& spec : remaining) {
             ++attempts;
-            BackendAttemptOutcome current = run_backend_attempt(As, Bs, mu, opts, spec);
+            BackendAttemptOutcome current = run_backend_attempt(prepared, mu, opts, spec);
             if (!current.ok) {
                 last_error = current.error;
                 continue;
@@ -338,7 +417,7 @@ SolveResult AXYB_complete_grobner_with_retry(const std::vector<Matrix>& As, cons
     } else {
         std::vector<BackendAttemptOutcome> outcomes(remaining.size());
         tbb::parallel_for(0, static_cast<int>(remaining.size()), [&](int i) {
-            outcomes[static_cast<size_t>(i)] = run_backend_attempt(As, Bs, mu, opts, remaining[static_cast<size_t>(i)]);
+            outcomes[static_cast<size_t>(i)] = run_backend_attempt(prepared, mu, opts, remaining[static_cast<size_t>(i)]);
         });
         attempts += static_cast<int>(remaining.size());
         for (size_t i = 0; i < outcomes.size(); ++i) {
@@ -370,6 +449,26 @@ void print_matrix(const Matrix& M, const char* name) {
         for (int c = 0; c < M.cols; ++c) std::cout << std::setw(14) << M(r, c) << ' ';
         std::cout << '\n';
     }
+}
+
+void print_dense_solve_diagnostics(const SolveResult& result) {
+    if (result.dense_solve_diagnostics.empty()) return;
+    const std::streamsize old_precision = std::cout.precision();
+    std::cout << "dense solve determinants:\n" << std::setprecision(18);
+    for (const auto& diag : result.dense_solve_diagnostics) {
+        std::cout << "  x" << diag.action << ": det(C0) = ";
+        if (!diag.c0_determinant.computed) {
+            std::cout << "unavailable";
+        } else if (diag.c0_determinant.sign == 0) {
+            std::cout << "0";
+        } else {
+            std::cout << (diag.c0_determinant.sign > 0 ? "+" : "-")
+                      << diag.c0_determinant.mantissa
+                      << "e" << diag.c0_determinant.exponent10;
+        }
+        std::cout << "\n";
+    }
+    std::cout << std::setprecision(old_precision);
 }
 
 } // namespace axyb

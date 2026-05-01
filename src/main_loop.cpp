@@ -108,6 +108,8 @@ int main(int argc, char** argv) {
         }
         std::cout << "\nbackend = " << cli.common.solver.backend_name;
         if (cli.common.retry_tol_set) std::cout << "\nretry_tol = " << cli.common.retry_tol;
+        if (cli.common.solver.prescale != 1.0) std::cout << "\nprescale = " << cli.common.solver.prescale;
+        if (cli.common.solver.asymmetric) std::cout << "\nasymmetric = true";
         if (!cli.output_meas.empty()) std::cout << "\noutput_meas = " << cli.output_meas;
         std::cout << "\n";
 
@@ -129,6 +131,7 @@ int main(int argc, char** argv) {
                       << ", Y: " << axyb::pose_error(r.Y, problem->Y0);
             if (cli.common.retry_tol_set) std::cout << ", backend: " << r.backend_name << ", attempts: " << r.attempts;
             std::cout << "\n";
+            axyb::print_dense_solve_diagnostics(r);
         }
 
         if (out) axyb::write_problem_sequence_footer(out);

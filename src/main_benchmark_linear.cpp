@@ -25,9 +25,9 @@ struct BenchmarkCli {
 struct BenchmarkCase {
     int action = 0;
     double scale = 5e-3;
-    axyb::TemplateData tpl;
+    const axyb::TemplateData* tpl = nullptr;
     axyb::SparseMatrixCSC c0;
-    axyb::Matrix bb;
+    axyb::Matrix rhs;
 };
 
 struct BenchmarkResult {
@@ -39,6 +39,19 @@ struct BenchmarkResult {
     std::vector<double> template_avg_ms;
     std::string error;
 };
+
+void scale_sparse_inplace(axyb::SparseMatrixCSC& matrix, double alpha) {
+    if (alpha == 1.0) return;
+    for (double& value : matrix.values) value *= alpha;
+}
+
+axyb::Matrix dense_from_sparse(const axyb::SparseMatrixCSC& sparse) {
+    axyb::Matrix dense(sparse.rows, sparse.cols);
+    for (int col = 0; col < sparse.cols; ++col)
+        for (int p = sparse.col_ptr[col]; p < sparse.col_ptr[col + 1]; ++p)
+            dense(sparse.row_idx[p], col) = sparse.values[p];
+    return dense;
+}
 
 void print_help(const char* exe) {
     std::cout
@@ -56,12 +69,20 @@ void print_help(const char* exe) {
         << "  --seed N             reproducible seed\n"
         << "  --pcg-tol X          default 1e-8\n"
         << "  --pcg-maxit N        default 300\n"
+        << "  --prescale X         multiply assembled C0 and C1 template matrices; default 1\n"
+        << "  --asymmetric         solve C0 * x = C1t directly\n"
+        << "  --verbose            accepted for CLI consistency; benchmark prints no dense diagnostics\n"
         << "  --no-fallback        disable dense direct fallback for iterative methods\n"
         << "  --repeats N          timed passes per backend, default 3\n"
         << "  --warmup N           untimed passes per backend, default 1\n"
         << "  --help\n\n"
         << "Benchmarked backends: tbb-pcg, tbb-block-jacobi, lapack-posv, lapack-gesv,\n"
-        << "                      eigen-llt, eigen-ldlt, eigen-partial-piv-lu, eigen-sparse-lu\n";
+        << "                      lapack-llt, lapack-partial-piv-lu, lapack-ldlt,\n"
+        << "                      lapack-pinv, lapack-svd, eigen-llt, eigen-ldlt,\n"
+        << "                      eigen-partial-piv-lu, eigen-sparse-lu\n"
+        << "Asymmetric mode benchmarks only: lapack-gesv, lapack-partial-piv-lu,\n"
+        << "                                 lapack-pinv, lapack-svd,\n"
+        << "                                 eigen-partial-piv-lu, eigen-sparse-lu\n";
 }
 
 BenchmarkCli parse_benchmark_cli(int argc, char** argv) {
@@ -162,13 +183,13 @@ std::vector<BenchmarkCase> prepare_cases(const axyb::SolverOptions& opts, const 
     for (int action : selected_actions(opts)) {
         BenchmarkCase bench_case;
         bench_case.action = action;
-        bench_case.tpl = axyb::load_template(opts.template_dir, action);
-        auto coeff = axyb::map_coefficients(bench_case.tpl, weights);
-        bench_case.c0 = axyb::build_sparse_from_template(bench_case.tpl.n, bench_case.tpl.n, bench_case.tpl.c0_linear,
-                                                         bench_case.tpl.c0_coeff, coeff);
-        auto c1 = axyb::build_sparse_from_template(bench_case.tpl.n, bench_case.tpl.m, bench_case.tpl.c1_linear,
-                                                   bench_case.tpl.c1_coeff, coeff);
-        bench_case.bb = axyb::compute_BB(bench_case.c0, c1, bench_case.scale);
+        bench_case.tpl = &axyb::load_template_cached(opts.template_dir, action);
+        auto coeff = axyb::map_coefficients(*bench_case.tpl, weights);
+        bench_case.c0 = axyb::build_c0_from_template(*bench_case.tpl, coeff);
+        auto c1 = axyb::build_c1_from_template(*bench_case.tpl, coeff);
+        scale_sparse_inplace(bench_case.c0, opts.prescale);
+        scale_sparse_inplace(c1, opts.prescale);
+        bench_case.rhs = opts.asymmetric ? dense_from_sparse(c1) : axyb::compute_BB(bench_case.c0, c1, bench_case.scale);
         cases.push_back(std::move(bench_case));
     }
     return cases;
@@ -184,7 +205,7 @@ void run_pass(const std::vector<BenchmarkCase>& cases, const axyb::SolverOptions
     for (size_t i = 0; i < cases.size(); ++i) {
         const auto& bench_case = cases[i];
         auto start = std::chrono::steady_clock::now();
-        axyb::Matrix x = axyb::solve_template_system(bench_case.c0, bench_case.bb, mu, bench_case.scale, bench_case.tpl, opts);
+        axyb::Matrix x = axyb::solve_template_system(bench_case.c0, bench_case.rhs, mu, bench_case.scale, *bench_case.tpl, opts);
         auto stop = std::chrono::steady_clock::now();
         if (per_case_ms) {
             (*per_case_ms)[i] += std::chrono::duration<double, std::milli>(stop - start).count();
@@ -246,18 +267,30 @@ int main(int argc, char** argv) {
             "tbb-block-jacobi",
             "lapack-posv",
             "lapack-gesv",
+            "lapack-llt",
+            "lapack-partial-piv-lu",
+            "lapack-ldlt",
+            "lapack-pinv",
+            "lapack-svd",
             "eigen-llt",
             "eigen-ldlt",
             "eigen-partial-piv-lu",
             "eigen-sparse-lu"
         };
+        if (cli.common.solver.asymmetric) {
+            backends = {"lapack-gesv", "lapack-partial-piv-lu", "lapack-pinv", "lapack-svd",
+                        "eigen-partial-piv-lu", "eigen-sparse-lu"};
+        }
 
         std::cout << "seed = " << seed << "\n";
         std::cout << "data_dir = " << cli.common.solver.template_dir << "\n";
         print_action_list(cases);
         std::cout << "repeats = " << cli.repeats << "\n";
         std::cout << "warmup = " << cli.warmup << "\n";
-        std::cout << "len = " << cli.common.len << ", noise = " << cli.common.noise << ", mu = " << cli.common.mu << "\n";
+        std::cout << "len = " << cli.common.len << ", noise = " << cli.common.noise << ", mu = " << cli.common.mu;
+        if (cli.common.solver.prescale != 1.0) std::cout << ", prescale = " << cli.common.solver.prescale;
+        if (cli.common.solver.asymmetric) std::cout << ", asymmetric = true";
+        std::cout << "\n";
         std::cout << std::left << std::setw(22) << "backend"
                   << std::right << std::setw(14) << "total ms"
                   << std::setw(14) << "avg ms"

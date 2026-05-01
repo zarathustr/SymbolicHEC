@@ -310,6 +310,8 @@ int main(int argc, char** argv) {
         for (int camera : cameras) std::cout << ' ' << camera;
         std::cout << "\nbackend = " << cli.common.solver.backend_name;
         if (cli.common.retry_tol_set) std::cout << "\nretry_tol = " << cli.common.retry_tol;
+        if (cli.common.solver.prescale != 1.0) std::cout << "\nprescale = " << cli.common.solver.prescale;
+        if (cli.common.solver.asymmetric) std::cout << "\nasymmetric = true";
         std::cout << "\n";
 
         std::vector<PairSolution> solved_pairs;
@@ -338,6 +340,7 @@ int main(int argc, char** argv) {
                 std::cout << ", backend = " << result.backend_name << ", attempts = " << result.attempts;
             }
             std::cout << "\n";
+            axyb::print_dense_solve_diagnostics(result);
         }
 
         if (solved_pairs.empty()) throw std::runtime_error("no tag/camera pair met --min-measurements");

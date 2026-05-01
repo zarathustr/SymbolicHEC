@@ -110,6 +110,8 @@ int main(int argc, char** argv) {
                   << "\nlen = " << problem.As.size()
                   << "\nbackend = " << cli.common.solver.backend_name;
         if (cli.common.retry_tol_set) std::cout << "\nretry_tol = " << cli.common.retry_tol;
+        if (cli.common.solver.prescale != 1.0) std::cout << "\nprescale = " << cli.common.solver.prescale;
+        if (cli.common.solver.asymmetric) std::cout << "\nasymmetric = true";
         std::cout << "\nsuccess_tol = " << cli.success_tol
                   << "\nground_truth objective = " << objective_gt
                   << "\nestimated objective = " << result.objective
@@ -121,6 +123,7 @@ int main(int argc, char** argv) {
                       << "\nbackend attempts = " << result.attempts;
         }
         std::cout << "\n";
+        axyb::print_dense_solve_diagnostics(result);
 
         axyb::print_matrix(result.X, "X_est");
         axyb::print_matrix(problem.X0, "X_gt");

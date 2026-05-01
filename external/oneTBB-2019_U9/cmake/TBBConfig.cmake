@@ -48,8 +48,8 @@ get_filename_component(_tbb_root "${_tbb_root}" PATH)
 foreach (_tbb_component ${TBB_FIND_COMPONENTS})
     set(TBB_${_tbb_component}_FOUND 0)
 
-    set(_tbb_release_lib "/Users/zarathustra/git/AXYB_cmake_cpp/cmake-build-relwithdebinfo/tbb_cmake_build/tbb_cmake_build_subdir_release/lib${_tbb_component}.dylib")
-    set(_tbb_debug_lib "/Users/zarathustra/git/AXYB_cmake_cpp/cmake-build-relwithdebinfo/tbb_cmake_build/tbb_cmake_build_subdir_debug/lib${_tbb_component}_debug.dylib")
+    set(_tbb_release_lib "/Users/zarathustra/git/AXYB_cmake_cpp/build/tbb_cmake_build/tbb_cmake_build_subdir_release/lib${_tbb_component}.dylib")
+    set(_tbb_debug_lib "/Users/zarathustra/git/AXYB_cmake_cpp/build/tbb_cmake_build/tbb_cmake_build_subdir_debug/lib${_tbb_component}_debug.dylib")
 
     if (EXISTS "${_tbb_release_lib}" OR EXISTS "${_tbb_debug_lib}")
         if (NOT TARGET TBB::${_tbb_component})
